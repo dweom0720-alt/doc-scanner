@@ -7,6 +7,7 @@ import android.content.IntentSender;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -49,6 +50,12 @@ public class MainActivity extends AppCompatActivity {
     private Button[] modeBtns;
     private Button makeBtn, scanBtn;
     private TextView newDocBtn;
+    // 여러 장 선택
+    private boolean selecting = false;
+    private final java.util.Set<String> selected = new java.util.HashSet<>();
+    private LinearLayout countRow, selBar, bottomRow;
+    private TextView selCount, selectBtn;
+    private androidx.activity.OnBackPressedCallback backCb;
 
     private ActivityResultLauncher<String> pickLauncher;
 
@@ -59,6 +66,10 @@ public class MainActivity extends AppCompatActivity {
         mode = getSharedPreferences("pdf", MODE_PRIVATE).getInt("mode", PdfMaker.MODE_BW);
         pickLauncher = registerForActivityResult(new ActivityResultContracts.GetMultipleContents(), this::importImages);
         setContentView(buildUi());
+        backCb = new androidx.activity.OnBackPressedCallback(false) {
+            @Override public void handleOnBackPressed() { endSelect(); }
+        };
+        getOnBackPressedDispatcher().addCallback(this, backCb);
         refresh();
     }
 
@@ -127,7 +138,7 @@ public class MainActivity extends AppCompatActivity {
         countLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         countLabel.setTypeface(countLabel.getTypeface(), android.graphics.Typeface.BOLD);
         countLabel.setPadding(dp(22), dp(4), dp(22), dp(8));
-        LinearLayout countRow = new LinearLayout(this);
+        countRow = new LinearLayout(this);
         countRow.setGravity(Gravity.CENTER_VERTICAL);
         countRow.addView(countLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         newDocBtn = new TextView(this);
@@ -136,8 +147,30 @@ public class MainActivity extends AppCompatActivity {
         newDocBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         newDocBtn.setPadding(dp(12), dp(6), dp(22), dp(8));
         newDocBtn.setOnClickListener(v -> confirmNewDoc());
+        selectBtn = new TextView(this);
+        selectBtn.setText("선택");
+        selectBtn.setTextColor(BLUE);
+        selectBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        selectBtn.setPadding(dp(12), dp(6), dp(4), dp(8));
+        selectBtn.setOnClickListener(v -> startSelect(null));
+        countRow.addView(selectBtn);
         countRow.addView(newDocBtn);
         root.addView(countRow);
+
+        selBar = new LinearLayout(this);
+        selBar.setGravity(Gravity.CENTER_VERTICAL);
+        selBar.setBackgroundColor(0xFFE0E7FF);
+        selBar.setPadding(dp(16), dp(6), dp(8), dp(6));
+        selCount = new TextView(this);
+        selCount.setTextColor(INK);
+        selCount.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        selCount.setTypeface(null, android.graphics.Typeface.BOLD);
+        selBar.addView(selCount, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        selBar.addView(selAction("전체 선택", BLUE, v -> toggleAll()));
+        selBar.addView(selAction("삭제", 0xFFDC2626, v -> deleteSelected()));
+        selBar.addView(selAction("취소", SUB, v -> endSelect()));
+        selBar.setVisibility(View.GONE);
+        root.addView(selBar);
 
         ScrollView sv = new ScrollView(this);
         thumbs = new LinearLayout(this);
@@ -154,6 +187,7 @@ public class MainActivity extends AppCompatActivity {
 
         // 하단 버튼
         LinearLayout btnRow = new LinearLayout(this);
+        bottomRow = btnRow;
         btnRow.setPadding(dp(16), dp(10), dp(16), dp(16));
         btnRow.setBackgroundColor(Color.WHITE);
         Button scan = bigButton("사진 찍기", BLUE, Color.WHITE);
@@ -241,6 +275,56 @@ public class MainActivity extends AppCompatActivity {
     };
     private final ExecutorService thumbIo = Executors.newSingleThreadExecutor();
 
+    private TextView selAction(String t, int color, View.OnClickListener l) {
+        TextView v = new TextView(this);
+        v.setText(t);
+        v.setTextColor(color);
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        v.setTypeface(null, android.graphics.Typeface.BOLD);
+        v.setPadding(dp(12), dp(10), dp(12), dp(10));
+        v.setOnClickListener(l);
+        return v;
+    }
+
+    private void startSelect(File first) {
+        selecting = true;
+        selected.clear();
+        if (first != null) selected.add(first.getPath());
+        refresh();
+    }
+
+    private void endSelect() {
+        selecting = false;
+        selected.clear();
+        refresh();
+    }
+
+    private void toggle(File f) {
+        if (!selected.remove(f.getPath())) selected.add(f.getPath());
+        refresh();
+    }
+
+    private void toggleAll() {
+        List<File> all = store.list();
+        if (selected.size() == all.size()) selected.clear();
+        else for (File f : all) selected.add(f.getPath());
+        refresh();
+    }
+
+    private void deleteSelected() {
+        if (selected.isEmpty()) { toast("지울 사진을 눌러 선택하세요"); return; }
+        int n = selected.size();
+        new AlertDialog.Builder(this)
+                .setMessage(n + "장을 지울까요?")
+                .setPositiveButton("삭제", (d, w) -> {
+                    for (String p : selected) store.delete(new File(p));
+                    toast(n + "장 삭제됨");
+                    endSelect();
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
     private android.content.SharedPreferences doc() { return getSharedPreferences("doc", MODE_PRIVATE); }
 
     private void refresh() {
@@ -251,7 +335,15 @@ public class MainActivity extends AppCompatActivity {
         else if (!pages.isEmpty()) head += " · 사진을 누르면 PDF 결과를 미리 볼 수 있어요";
         countLabel.setText(head);
         scanBtn.setText(pages.isEmpty() ? "사진 찍기" : "이어서 찍기");
+        if (pages.isEmpty()) selecting = false;
+        selected.retainAll(pathsOf(pages));
+        countRow.setVisibility(selecting ? View.GONE : View.VISIBLE);
+        selBar.setVisibility(selecting ? View.VISIBLE : View.GONE);
+        bottomRow.setVisibility(selecting ? View.GONE : View.VISIBLE);
+        selCount.setText(selected.size() + "장 선택됨");
+        if (backCb != null) backCb.setEnabled(selecting);
         newDocBtn.setVisibility(pages.isEmpty() && docName == null ? View.GONE : View.VISIBLE);
+        selectBtn.setVisibility(pages.isEmpty() ? View.GONE : View.VISIBLE);
         makeBtn.setEnabled(!pages.isEmpty());
         makeBtn.setAlpha(pages.isEmpty() ? 0.4f : 1f);
         thumbs.removeAllViews();
@@ -268,6 +360,12 @@ public class MainActivity extends AppCompatActivity {
         }
         int rest = (3 - pages.size() % 3) % 3;
         for (int k = 0; k < rest; k++) row.addView(new View(this), cellParams());
+    }
+
+    private static java.util.Set<String> pathsOf(List<File> fs) {
+        java.util.Set<String> s = new java.util.HashSet<>();
+        for (File f : fs) s.add(f.getPath());
+        return s;
     }
 
     private LinearLayout.LayoutParams cellParams() {
@@ -304,15 +402,32 @@ public class MainActivity extends AppCompatActivity {
                 ui.post(() -> { if (key.equals(iv.getTag())) iv.setImageBitmap(t); });
             });
         }
-        box.setOnClickListener(v -> startActivity(PageViewerActivity.open(this, idx)));
-        box.setOnLongClickListener(v -> {
-            new AlertDialog.Builder(this)
-                    .setMessage((idx + 1) + "쪽을 지울까요?")
-                    .setPositiveButton("삭제", (d, w) -> { store.delete(f); refresh(); })
-                    .setNegativeButton("취소", null)
-                    .show();
-            return true;
-        });
+        if (selecting) {
+            boolean on = selected.contains(f.getPath());
+            View shade = new View(this);
+            shade.setBackgroundColor(on ? 0x552447C9 : 0x22000000);
+            box.addView(shade, new FrameLayout.LayoutParams(-1, -1));
+            TextView check = new TextView(this);
+            check.setText(on ? "✓" : "");
+            check.setGravity(Gravity.CENTER);
+            check.setTextColor(Color.WHITE);
+            check.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            check.setTypeface(null, android.graphics.Typeface.BOLD);
+            GradientDrawable dot = new GradientDrawable();
+            dot.setShape(GradientDrawable.OVAL);
+            dot.setColor(on ? BLUE : 0x88FFFFFF);
+            dot.setStroke(dp(2), Color.WHITE);
+            check.setBackground(dot);
+            FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(dp(28), dp(28), Gravity.END | Gravity.TOP);
+            cp.setMargins(0, dp(4), dp(4), 0);
+            box.addView(check, cp);
+            box.setBackgroundColor(on ? BLUE : Color.WHITE);
+            box.setOnClickListener(v -> toggle(f));
+            box.setOnLongClickListener(v -> { toggle(f); return true; });
+        } else {
+            box.setOnClickListener(v -> startActivity(PageViewerActivity.open(this, idx)));
+            box.setOnLongClickListener(v -> { startSelect(f); return true; });
+        }
         return box;
     }
 

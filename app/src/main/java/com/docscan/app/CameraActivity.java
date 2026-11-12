@@ -69,7 +69,7 @@ public class CameraActivity extends AppCompatActivity {
     private TextView status, doneBtn;
     private ImageView lastThumb;
     private Button torchBtn;
-    private TextView modeAuto, modeManual, kindPaper, kindScreen;
+    private TextView modeAuto, modeManual, kindPaper, kindScreen, rangeAuto, rangeFixed, snapBtn;
     private android.content.SharedPreferences prefs;
 
     private ImageCapture capture;
@@ -80,6 +80,11 @@ public class CameraActivity extends AppCompatActivity {
 
     // 분석 스레드 상태
     private volatile boolean auto = true, screen = false, capturing = false, torch = false;
+    // 범위 고정
+    private volatile boolean fixed = false, dragging = false, snapReq = false, rebase = false;
+    private volatile double[] fixedRel;
+    private volatile long editQuietUntil = 0;
+    private float[] prevPrint;
     private double[] prevRel;
     private volatile long stableSince = -1, cooldownUntil = 0;
     private volatile float[] lastPrint;
@@ -94,6 +99,8 @@ public class CameraActivity extends AppCompatActivity {
         prefs = getSharedPreferences("camera", MODE_PRIVATE);
         auto = prefs.getBoolean("auto", true);
         screen = prefs.getBoolean("screen", false);
+        fixed = prefs.getBoolean("fixed", false);
+        fixedRel = loadFixed();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         base = store.count();
         setContentView(buildUi());
@@ -122,6 +129,15 @@ public class CameraActivity extends AppCompatActivity {
         root.addView(preview, new FrameLayout.LayoutParams(-1, -1));
 
         overlay = new Overlay(this);
+        overlay.listener = (r, done) -> {
+            if (!done) { dragging = true; fixedRel = r; return; }
+            fixedRel = orderRel(r);
+            dragging = false;
+            saveFixed();
+            editQuietUntil = SystemClock.uptimeMillis() + 1200;
+            stableSince = -1;
+            if (added > 0) rebase = true; // 범위만 바꾼 것 — 지금 화면은 이미 찍은 것으로 간주
+        };
         root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
 
         status = new TextView(this);
@@ -150,6 +166,25 @@ public class CameraActivity extends AppCompatActivity {
         switches.addView(gap, new LinearLayout.LayoutParams(dp(14), 1));
         switches.addView(group(kindPaper, kindScreen));
         top.addView(switches, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setGravity(Gravity.CENTER);
+        row2.setPadding(dp(10), 0, dp(10), dp(8));
+        row2.setBackgroundColor(0x66000000);
+        rangeAuto = seg("범위 자동 인식"); rangeFixed = seg("범위 고정");
+        rangeAuto.setOnClickListener(v -> setFixed(false));
+        rangeFixed.setOnClickListener(v -> setFixed(true));
+        row2.addView(group(rangeAuto, rangeFixed));
+        snapBtn = seg("자동 맞춤");
+        GradientDrawable sb = new GradientDrawable();
+        sb.setColor(0xFF16A34A);
+        sb.setCornerRadius(dp(18));
+        snapBtn.setBackground(sb);
+        snapBtn.setTextColor(Color.WHITE);
+        snapBtn.setOnClickListener(v -> { snapReq = true; status.setText("범위 찾는 중…"); });
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-2, -2);
+        sp.leftMargin = dp(10);
+        row2.addView(snapBtn, sp);
+        top.addView(row2, new LinearLayout.LayoutParams(-1, -2));
         root.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
 
         LinearLayout bar = new LinearLayout(this);
@@ -243,6 +278,54 @@ public class CameraActivity extends AppCompatActivity {
     private void paintModes() {
         paintSeg(modeAuto, auto); paintSeg(modeManual, !auto);
         paintSeg(kindPaper, !screen); paintSeg(kindScreen, screen);
+        paintSeg(rangeAuto, !fixed); paintSeg(rangeFixed, fixed);
+        snapBtn.setVisibility(fixed ? View.VISIBLE : View.GONE);
+        overlay.editable = fixed;
+        if (fixed) overlay.set(fixedRel != null ? fixedRel : defaultRel(), overlay.fw, overlay.fh, 0f);
+    }
+
+    private void setFixed(boolean f) {
+        if (f && fixedRel == null) fixedRel = latestRel != null ? latestRel.clone() : defaultRel();
+        fixed = f;
+        prevPrint = null;
+        stableSince = -1;
+        prefs.edit().putBoolean("fixed", f).apply();
+        saveFixed();
+        paintModes();
+        status.setText(f ? "범위 고정: 네 모서리를 끌어 문서에 맞추세요 (또는 '자동 맞춤')" : "범위 자동 인식: 매번 테두리를 찾아요");
+    }
+
+    private static double[] defaultRel() { return new double[]{0.08, 0.08, 0.92, 0.08, 0.92, 0.92, 0.08, 0.92}; }
+
+    private double[] loadFixed() {
+        String s = prefs.getString("fixedRel", null);
+        if (s == null) return null;
+        try {
+            String[] p = s.split(",");
+            double[] r = new double[8];
+            for (int i = 0; i < 8; i++) r[i] = Double.parseDouble(p[i]);
+            return r;
+        } catch (Exception e) { return null; }
+    }
+
+    private void saveFixed() {
+        double[] r = fixedRel;
+        if (r == null) return;
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < 8; i++) { if (i > 0) b.append(','); b.append(r[i]); }
+        prefs.edit().putString("fixedRel", b.toString()).apply();
+    }
+
+    /** 모서리를 엇갈리게 끌어도 좌상·우상·우하·좌하 순서로 정리 */
+    private static double[] orderRel(double[] r) {
+        double cx = 0, cy = 0;
+        for (int i = 0; i < 4; i++) { cx += r[i * 2] / 4; cy += r[i * 2 + 1] / 4; }
+        Integer[] idx = {0, 1, 2, 3};
+        final double fx = cx, fy = cy;
+        java.util.Arrays.sort(idx, (a, b) -> Double.compare(Math.atan2(r[a * 2 + 1] - fy, r[a * 2] - fx), Math.atan2(r[b * 2 + 1] - fy, r[b * 2] - fx)));
+        double[] o = new double[8];
+        for (int i = 0; i < 4; i++) { o[i * 2] = r[idx[i] * 2]; o[i * 2 + 1] = r[idx[i] * 2 + 1]; }
+        return o;
     }
 
     private void setAuto(boolean a) {
@@ -342,38 +425,72 @@ public class CameraActivity extends AppCompatActivity {
             }
             int fw = rgb.cols(), fh = rgb.rows();
             final boolean scr = screen;
-            Point[] q = DocDetector.detect(rgb, 480, scr);
+            final boolean fix = fixed;
             long now = SystemClock.uptimeMillis();
-
             double[] rel = null;
             float[] print = null;
-            if (q != null) {
-                rel = new double[8];
-                for (int i = 0; i < 4; i++) { rel[i * 2] = q[i].x / fw; rel[i * 2 + 1] = q[i].y / fh; }
-                print = DocDetector.fingerprint(rgb, q);
+
+            if (fix && snapReq) {
+                snapReq = false;
+                Point[] d = DocDetector.detect(rgb, 640, scr);
+                if (d != null) {
+                    double[] r = new double[8];
+                    for (int i = 0; i < 4; i++) { r[i * 2] = d[i].x / fw; r[i * 2 + 1] = d[i].y / fh; }
+                    fixedRel = r;
+                    saveFixed();
+                    editQuietUntil = now + 1200;
+                    if (added > 0) rebase = true;
+                    runOnUiThread(() -> Toast.makeText(this, "범위를 맞췄어요 · 필요하면 모서리를 끌어 다듬으세요", Toast.LENGTH_SHORT).show());
+                } else {
+                    runOnUiThread(() -> Toast.makeText(this, "범위를 못 찾았어요 · 모서리를 직접 끌어 맞춰주세요", Toast.LENGTH_LONG).show());
+                }
             }
-            rgb.release();
-            latestRel = rel;
-            latestPrint = print;
 
             boolean stable;
-            if (rel == null) { stableSince = -1; stable = false; }
-            else {
-                if (prevRel == null || maxDelta(prevRel, rel) > 0.025 || stableSince < 0) stableSince = now;
-                stable = now - stableSince >= STABLE_MS;
+            if (fix) {
+                double[] fr = fixedRel != null ? fixedRel : defaultRel();
+                rel = fr.clone();
+                Point[] q = new Point[4];
+                for (int i = 0; i < 4; i++) q[i] = new Point(rel[i * 2] * fw, rel[i * 2 + 1] * fh);
+                print = DocDetector.fingerprint(rgb, q);
+                rgb.release();
+                // 상자 안 내용이 그대로 멈춰 있는지(다음 페이지로 넘어간 뒤 화면이 안정됐는지)
+                if (dragging || now < editQuietUntil) stableSince = -1;
+                else if (prevPrint == null || DocDetector.similarity(prevPrint, print) < 0.95 || stableSince < 0) stableSince = now;
+                prevPrint = print;
+                stable = stableSince >= 0 && now - stableSince >= STABLE_MS;
+                if (rebase && !dragging && now >= editQuietUntil) { lastPrint = print; rebase = false; }
+            } else {
+                Point[] q = DocDetector.detect(rgb, 480, scr);
+                if (q != null) {
+                    rel = new double[8];
+                    for (int i = 0; i < 4; i++) { rel[i * 2] = q[i].x / fw; rel[i * 2 + 1] = q[i].y / fh; }
+                    print = DocDetector.fingerprint(rgb, q);
+                }
+                rgb.release();
+                if (rel == null) { stableSince = -1; stable = false; }
+                else {
+                    if (prevRel == null || maxDelta(prevRel, rel) > 0.025 || stableSince < 0) stableSince = now;
+                    stable = now - stableSince >= STABLE_MS;
+                }
+                prevRel = rel;
             }
-            prevRel = rel;
+            latestRel = rel;
+            latestPrint = print;
             float progress = rel == null || stableSince < 0 ? 0f : Math.min(1f, (now - stableSince) / (float) STABLE_MS);
 
             String msg;
             boolean shoot = false;
             if (capturing) msg = "찍는 중…";
+            else if (fix && dragging) msg = "모서리를 맞추는 중…";
+            else if (fix && !auto) msg = "범위 고정 · 가운데 버튼으로 찍으세요";
             else if (rel == null) msg = scr ? (auto ? "모니터 화면을 비추세요" : "수동 촬영 — 가운데 버튼으로 찍으세요")
                                             : (auto ? "문서를 화면에 비추세요" : "수동 촬영 — 가운데 버튼으로 찍으세요");
             else if (!auto) msg = "범위 인식됨 — 가운데 버튼으로 찍으세요";
-            else if (now < cooldownUntil) msg = "저장했습니다 · 다음 장을 놓아주세요";
-            else if (lastPrint != null && DocDetector.similarity(lastPrint, print) > SAME_PAGE) msg = "방금 찍은 장이에요 · 다음 장을 놓아주세요";
-            else if (!stable) msg = "그대로 잠깐만 멈춰 주세요";
+            else if (now < cooldownUntil) msg = fix ? "저장했습니다 · 다음 페이지로 넘기세요" : "저장했습니다 · 다음 장을 놓아주세요";
+            else if (lastPrint != null && DocDetector.similarity(lastPrint, print) > SAME_PAGE)
+                msg = fix ? "같은 화면이에요 · 다음 페이지로 넘기면 자동으로 찍어요" : "방금 찍은 장이에요 · 다음 장을 놓아주세요";
+            else if (!stable) msg = fix ? "화면이 멈추면 찍어요…" : "그대로 잠깐만 멈춰 주세요";
             else { msg = "찍는 중…"; shoot = true; }
 
             final double[] relF = rel;
@@ -419,7 +536,7 @@ public class CameraActivity extends AppCompatActivity {
                     int rot = image.getImageInfo().getRotationDegrees();
                     image.close();
                     Bitmap full = Cropper.decode(jpeg, rot, 3200);
-                    page = Cropper.crop(full, rel, scr);
+                    page = Cropper.crop(full, relShot, scr, fix);
                     if (page != full) full.recycle();
                     store.save(page);
                     lastPrint = print;
@@ -468,35 +585,89 @@ public class CameraActivity extends AppCompatActivity {
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
     // ---------- 테두리 표시 ----------
+    interface EditListener { void onEdit(double[] rel, boolean done); }
+
     private static final class Overlay extends View {
         private double[] rel;
-        private int fw = 3, fh = 4;
+        int fw = 3, fh = 4;
         private float progress;
         private long flashUntil;
+        boolean editable;
+        EditListener listener;
+        private int drag = -1;
+        private final float density;
         private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint knob = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint knobRing = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
 
         Overlay(Context c) {
             super(c);
+            density = c.getResources().getDisplayMetrics().density;
             line.setStyle(Paint.Style.STROKE);
-            line.setStrokeWidth(6 * c.getResources().getDisplayMetrics().density);
+            line.setStrokeWidth(4 * density);
             line.setStrokeJoin(Paint.Join.ROUND);
             fill.setStyle(Paint.Style.FILL);
+            knob.setStyle(Paint.Style.FILL);
+            knob.setColor(Color.WHITE);
+            knobRing.setStyle(Paint.Style.STROKE);
+            knobRing.setStrokeWidth(4 * density);
+            knobRing.setColor(0xFF2447C9);
         }
 
         void set(double[] r, int w, int h, float p) {
-            rel = r; fw = w; fh = h; progress = p;
+            fw = w; fh = h; progress = p;
+            if (drag < 0) rel = r == null ? null : r.clone();
             invalidate();
         }
 
         void flash() { flashUntil = SystemClock.uptimeMillis() + 150; invalidate(); }
 
+        private float sc() { return Math.min(getWidth() / (float) fw, getHeight() / (float) fh); }
+        private float ox() { return (getWidth() - fw * sc()) / 2f; }
+        private float oy() { return (getHeight() - fh * sc()) / 2f; }
+
+        @Override public boolean onTouchEvent(android.view.MotionEvent e) {
+            if (!editable || rel == null) return false;
+            float s = sc(), ox = ox(), oy = oy();
+            switch (e.getActionMasked()) {
+                case android.view.MotionEvent.ACTION_DOWN: {
+                    float best = 48 * density;
+                    drag = -1;
+                    for (int i = 0; i < 4; i++) {
+                        float x = ox + (float) rel[i * 2] * fw * s, y = oy + (float) rel[i * 2 + 1] * fh * s;
+                        float d = (float) Math.hypot(e.getX() - x, e.getY() - y);
+                        if (d < best) { best = d; drag = i; }
+                    }
+                    if (drag < 0) return false;
+                    getParent().requestDisallowInterceptTouchEvent(true);
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_MOVE: {
+                    if (drag < 0) return false;
+                    double rx = Math.max(0, Math.min(1, (e.getX() - ox) / (fw * s)));
+                    double ry = Math.max(0, Math.min(1, (e.getY() - oy) / (fh * s)));
+                    rel[drag * 2] = rx;
+                    rel[drag * 2 + 1] = ry;
+                    invalidate();
+                    if (listener != null) listener.onEdit(rel.clone(), false);
+                    return true;
+                }
+                case android.view.MotionEvent.ACTION_UP:
+                case android.view.MotionEvent.ACTION_CANCEL: {
+                    if (drag < 0) return false;
+                    drag = -1;
+                    if (listener != null) listener.onEdit(rel.clone(), true);
+                    return true;
+                }
+            }
+            return false;
+        }
+
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
-            int vw = getWidth(), vh = getHeight();
-            float sc = Math.min(vw / (float) fw, vh / (float) fh);
-            float ox = (vw - fw * sc) / 2f, oy = (vh - fh * sc) / 2f;
+            float sc = sc(), ox = ox(), oy = oy();
             if (rel != null) {
                 path.reset();
                 for (int i = 0; i < 4; i++) {
@@ -504,11 +675,19 @@ public class CameraActivity extends AppCompatActivity {
                     if (i == 0) path.moveTo(x, y); else path.lineTo(x, y);
                 }
                 path.close();
-                int col = progress >= 1f ? 0xFF22C55E : 0xFFFACC15;
-                fill.setColor((col & 0x00FFFFFF) | 0x33000000);
+                int col = editable ? (progress >= 1f ? 0xFF22C55E : 0xFF60A5FA) : (progress >= 1f ? 0xFF22C55E : 0xFFFACC15);
+                fill.setColor((col & 0x00FFFFFF) | 0x26000000);
                 line.setColor(col);
                 c.drawPath(path, fill);
                 c.drawPath(path, line);
+                if (editable) {
+                    for (int i = 0; i < 4; i++) {
+                        float x = ox + (float) rel[i * 2] * fw * sc, y = oy + (float) rel[i * 2 + 1] * fh * sc;
+                        float r = (i == drag ? 20 : 14) * density;
+                        c.drawCircle(x, y, r, knob);
+                        c.drawCircle(x, y, r, knobRing);
+                    }
+                }
             }
             if (SystemClock.uptimeMillis() < flashUntil) {
                 c.drawColor(0x88FFFFFF);

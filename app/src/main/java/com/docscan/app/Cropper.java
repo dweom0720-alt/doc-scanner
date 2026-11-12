@@ -23,14 +23,17 @@ public final class Cropper {
     public static Bitmap crop(Bitmap src, double[] fallbackRel) { return crop(src, fallbackRel, false); }
 
     /** @param screen 모니터 촬영: 화면 속 문서(없으면 화면 전체)를 잡고, 물결무늬(모아레)를 살짝 눌러 줌 */
-    public static Bitmap crop(Bitmap src, double[] fallbackRel, boolean screen) {
+    public static Bitmap crop(Bitmap src, double[] fallbackRel, boolean screen) { return crop(src, fallbackRel, screen, false); }
+
+    /** @param fixed true면 인식 없이 fallbackRel(고정 범위) 그대로 잘라냄 */
+    public static Bitmap crop(Bitmap src, double[] fallbackRel, boolean screen, boolean fixed) {
         Mat rgba = new Mat();
         Utils.bitmapToMat(src, rgba);
         Mat rgb = new Mat();
         Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB);
         rgba.release();
 
-        Point[] q = DocDetector.detect(rgb, 800, screen);
+        Point[] q = (fixed && fallbackRel != null) ? null : DocDetector.detect(rgb, 800, screen);
         if (q == null && fallbackRel != null) {
             q = new Point[4];
             for (int i = 0; i < 4; i++)
