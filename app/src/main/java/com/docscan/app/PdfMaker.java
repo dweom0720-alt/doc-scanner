@@ -24,7 +24,7 @@ public final class PdfMaker {
     public interface Progress { void on(int done, int total); }
 
     public static final class Result {
-        public Uri uri; public String name; public long bytes; public int pages;
+        public Uri uri; public String name; public long bytes; public int pages; public boolean updated;
     }
 
     /** 모드별 긴 변 픽셀 수. 흑백은 1비트라 해상도를 높여도 용량이 작음 */
@@ -33,19 +33,43 @@ public final class PdfMaker {
     }
 
     public static Result make(Context ctx, List<File> pages, int mode, String name, Progress cb) throws IOException {
+        return make(ctx, pages, mode, name, null, cb);
+    }
+
+    /**
+     * @param existing 이어서 찍은 문서면 지난번에 만든 PDF 위치. 그 파일을 새 내용으로 덮어씀(없어졌으면 새로 만듦)
+     */
+    public static Result make(Context ctx, List<File> pages, int mode, String name, Uri existing, Progress cb) throws IOException {
         ContentResolver cr = ctx.getContentResolver();
-        ContentValues cv = new ContentValues();
-        cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
-        cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
-        cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/문서스캔");
-        cv.put(MediaStore.MediaColumns.IS_PENDING, 1);
-        Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
-        if (uri == null) throw new IOException("다운로드 폴더에 파일을 만들 수 없습니다");
+        Uri uri = null;
+        boolean fresh = false;
+        OutputStream raw = null;
+        if (existing != null) {
+            try {
+                raw = cr.openOutputStream(existing, "wt");
+                if (raw != null) {
+                    uri = existing;
+                    String n = queryName(cr, existing);
+                    if (n != null) name = n;
+                }
+            } catch (Exception ignored) { raw = null; }
+        }
+        if (raw == null) {
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/문서스캔");
+            cv.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) throw new IOException("다운로드 폴더에 파일을 만들 수 없습니다");
+            raw = cr.openOutputStream(uri);
+            if (raw == null) throw new IOException("파일을 열 수 없습니다");
+            fresh = true;
+        }
 
         Counting counting;
-        try (OutputStream raw = cr.openOutputStream(uri)) {
-            if (raw == null) throw new IOException("파일을 열 수 없습니다");
-            counting = new Counting(new BufferedOutputStream(raw, 1 << 16));
+        try (OutputStream r = raw) {
+            counting = new Counting(new BufferedOutputStream(r, 1 << 16));
             Core.PdfWriter pw = new Core.PdfWriter(counting);
             for (int i = 0; i < pages.size(); i++) {
                 addPage(pw, pages.get(i), mode);
@@ -54,18 +78,27 @@ public final class PdfMaker {
             pw.finish();
             counting.flush();
         } catch (IOException | RuntimeException | OutOfMemoryError e) {
-            cr.delete(uri, null, null);
+            if (fresh) cr.delete(uri, null, null);
             if (e instanceof OutOfMemoryError) throw new IOException("메모리가 부족합니다");
             throw e;
         }
 
-        ContentValues done = new ContentValues();
-        done.put(MediaStore.MediaColumns.IS_PENDING, 0);
-        cr.update(uri, done, null, null);
+        if (fresh) {
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(uri, done, null, null);
+        }
 
         Result r = new Result();
-        r.uri = uri; r.name = name; r.bytes = counting.count; r.pages = pages.size();
+        r.uri = uri; r.name = name; r.bytes = counting.count; r.pages = pages.size(); r.updated = !fresh;
         return r;
+    }
+
+    private static String queryName(ContentResolver cr, Uri uri) {
+        try (android.database.Cursor c = cr.query(uri, new String[]{MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception ignored) {}
+        return null;
     }
 
     /** PDF에 들어갈 한 장 (흑백이면 bits, 회색·컬러면 jpeg) */

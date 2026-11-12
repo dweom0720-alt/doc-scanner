@@ -47,7 +47,8 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout thumbs;
     private TextView countLabel, emptyHint;
     private Button[] modeBtns;
-    private Button makeBtn;
+    private Button makeBtn, scanBtn;
+    private TextView newDocBtn;
 
     private ActivityResultLauncher<String> pickLauncher;
 
@@ -126,7 +127,17 @@ public class MainActivity extends AppCompatActivity {
         countLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         countLabel.setTypeface(countLabel.getTypeface(), android.graphics.Typeface.BOLD);
         countLabel.setPadding(dp(22), dp(4), dp(22), dp(8));
-        root.addView(countLabel);
+        LinearLayout countRow = new LinearLayout(this);
+        countRow.setGravity(Gravity.CENTER_VERTICAL);
+        countRow.addView(countLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        newDocBtn = new TextView(this);
+        newDocBtn.setText("새 문서");
+        newDocBtn.setTextColor(0xFFDC2626);
+        newDocBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        newDocBtn.setPadding(dp(12), dp(6), dp(22), dp(8));
+        newDocBtn.setOnClickListener(v -> confirmNewDoc());
+        countRow.addView(newDocBtn);
+        root.addView(countRow);
 
         ScrollView sv = new ScrollView(this);
         thumbs = new LinearLayout(this);
@@ -147,6 +158,7 @@ public class MainActivity extends AppCompatActivity {
         btnRow.setBackgroundColor(Color.WHITE);
         Button scan = bigButton("사진 찍기", BLUE, Color.WHITE);
         scan.setOnClickListener(v -> startScan());
+        scanBtn = scan;
         makeBtn = bigButton("PDF 만들기", 0xFF17A34A, Color.WHITE);
         makeBtn.setOnClickListener(v -> makePdf());
         LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
@@ -229,10 +241,17 @@ public class MainActivity extends AppCompatActivity {
     };
     private final ExecutorService thumbIo = Executors.newSingleThreadExecutor();
 
+    private android.content.SharedPreferences doc() { return getSharedPreferences("doc", MODE_PRIVATE); }
+
     private void refresh() {
         List<File> pages = store.list();
-        countLabel.setText(pages.isEmpty() ? "담긴 페이지 0장"
-                : "담긴 페이지 " + pages.size() + "장 · 사진을 누르면 PDF 결과를 미리 볼 수 있어요");
+        String docName = doc().getString("name", null);
+        String head = pages.isEmpty() ? "담긴 페이지 0장" : "담긴 페이지 " + pages.size() + "장";
+        if (!pages.isEmpty() && docName != null) head += "\n'" + docName + "'에 이어서 저장돼요";
+        else if (!pages.isEmpty()) head += " · 사진을 누르면 PDF 결과를 미리 볼 수 있어요";
+        countLabel.setText(head);
+        scanBtn.setText(pages.isEmpty() ? "사진 찍기" : "이어서 찍기");
+        newDocBtn.setVisibility(pages.isEmpty() && docName == null ? View.GONE : View.VISIBLE);
         makeBtn.setEnabled(!pages.isEmpty());
         makeBtn.setAlpha(pages.isEmpty() ? 0.4f : 1f);
         thumbs.removeAllViews();
@@ -311,9 +330,10 @@ public class MainActivity extends AppCompatActivity {
 
         io.execute(() -> {
             try {
-                PdfMaker.Result res = PdfMaker.make(this, pages, mode, name,
+                String prev = doc().getString("uri", null);
+                PdfMaker.Result res = PdfMaker.make(this, pages, mode, name, prev == null ? null : Uri.parse(prev),
                         (done, total) -> ui.post(() -> dlg.setMessage(done + " / " + total)));
-                store.deleteAll(pages);
+                doc().edit().putString("uri", res.uri.toString()).putString("name", res.name).apply();
                 ui.post(() -> { dlg.dismiss(); refresh(); showDone(res); });
             } catch (Exception e) {
                 ui.post(() -> { dlg.dismiss(); toast("실패: " + e.getMessage()); });
@@ -325,13 +345,44 @@ public class MainActivity extends AppCompatActivity {
         String size = res.bytes < 1024 * 1024
                 ? (res.bytes / 1024) + " KB"
                 : String.format(Locale.US, "%.1f MB", res.bytes / 1024f / 1024f);
+        String title = (res.updated ? "PDF 업데이트 완료" : "저장 완료") + " · " + res.pages + "쪽 · " + size;
+        String[] items = {
+                "공유하기",
+                "PDF 열기",
+                "이어서 더 찍기 (이 PDF에 추가)",
+                "새 문서 시작 (담긴 사진 비우기)",
+                "닫기"
+        };
         new AlertDialog.Builder(this)
-                .setTitle("저장 완료")
-                .setMessage(res.name + "\n\n" + res.pages + "쪽 · " + size + "\n위치: 다운로드 / 문서스캔")
-                .setPositiveButton("공유", (d, w) -> share(res.uri))
-                .setNegativeButton("열기", (d, w) -> open(res.uri))
-                .setNeutralButton("닫기", null)
+                .setTitle(title)
+                .setItems(items, (d, which) -> {
+                    if (which == 0) share(res.uri);
+                    else if (which == 1) open(res.uri);
+                    else if (which == 2) startScan();
+                    else if (which == 3) newDoc();
+                })
                 .show();
+        toast(res.name + " (다운로드/문서스캔)");
+    }
+
+    private void confirmNewDoc() {
+        int n = store.count();
+        String name = doc().getString("name", null);
+        String msg = (n > 0 ? "담긴 " + n + "장을 비우고 " : "") + "새 문서를 시작할까요?"
+                + (name != null ? "\n\n이미 만든 '" + name + "'은(는) 그대로 남아요." : "\n\n아직 PDF로 만들지 않은 사진은 사라져요.");
+        new AlertDialog.Builder(this)
+                .setMessage(msg)
+                .setPositiveButton("새 문서", (d, w) -> newDoc())
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    private void newDoc() {
+        store.deleteAll(store.list());
+        doc().edit().clear().apply();
+        thumbCache.evictAll();
+        refresh();
+        toast("새 문서를 시작합니다");
     }
 
     private void share(Uri uri) {

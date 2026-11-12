@@ -85,7 +85,7 @@ public class CameraActivity extends AppCompatActivity {
     private volatile float[] lastPrint;
     private volatile double[] latestRel;
     private volatile float[] latestPrint;
-    private int added = 0;
+    private int added = 0, base = 0;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -95,7 +95,12 @@ public class CameraActivity extends AppCompatActivity {
         auto = prefs.getBoolean("auto", true);
         screen = prefs.getBoolean("screen", false);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        base = store.count();
         setContentView(buildUi());
+        if (base > 0) {
+            status.setText("이어서 찍기 · 지금 " + base + "장, " + (base + 1) + "쪽부터 붙어요");
+            Toast.makeText(this, (base + 1) + "쪽부터 이어서 찍습니다", Toast.LENGTH_SHORT).show();
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera();
         else requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAM);
     }
@@ -265,7 +270,7 @@ public class CameraActivity extends AppCompatActivity {
     }
 
     private void updateDone() {
-        doneBtn.setText("완료\n" + added + "장");
+        doneBtn.setText("완료\n총 " + (base + added) + "장");
     }
 
     // ---------- 카메라 ----------
