@@ -522,6 +522,8 @@ public class CameraActivity extends AppCompatActivity {
     private void takeShot(double[] rel, float[] print) {
         if (capture == null || capturing) return;
         final boolean scr = screen;
+        final boolean fix = fixed;
+        final double[] relShot = fix ? (fixedRel != null ? fixedRel.clone() : defaultRel()) : rel;
         capturing = true;
         runOnUiThread(() -> overlay.flash());
         capture.takePicture(workExec, new ImageCapture.OnImageCapturedCallback() {
