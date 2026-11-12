@@ -55,6 +55,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(b);
         OpenCVLoader.initLocal();
         store = new PageStore(this);
+        mode = getSharedPreferences("pdf", MODE_PRIVATE).getInt("mode", PdfMaker.MODE_BW);
         pickLauncher = registerForActivityResult(new ActivityResultContracts.GetMultipleContents(), this::importImages);
         setContentView(buildUi());
         refresh();
@@ -101,7 +102,11 @@ public class MainActivity extends AppCompatActivity {
             mb.setText(names[i]);
             mb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
             final int m = i;
-            mb.setOnClickListener(v -> { mode = m; paintModes(); });
+            mb.setOnClickListener(v -> {
+                mode = m;
+                getSharedPreferences("pdf", MODE_PRIVATE).edit().putInt("mode", m).apply();
+                paintModes();
+            });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
             lp.setMargins(dp(4), 0, dp(4), 0);
             modeRow.addView(mb, lp);
@@ -219,46 +224,77 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---------- 목록 ----------
+    private final android.util.LruCache<String, Bitmap> thumbCache = new android.util.LruCache<String, Bitmap>(24 * 1024 * 1024) {
+        @Override protected int sizeOf(String k, Bitmap v) { return v.getByteCount(); }
+    };
+    private final ExecutorService thumbIo = Executors.newSingleThreadExecutor();
+
     private void refresh() {
         List<File> pages = store.list();
-        countLabel.setText("담긴 페이지 " + pages.size() + "장");
+        countLabel.setText(pages.isEmpty() ? "담긴 페이지 0장"
+                : "담긴 페이지 " + pages.size() + "장 · 사진을 누르면 PDF 결과를 미리 볼 수 있어요");
         makeBtn.setEnabled(!pages.isEmpty());
         makeBtn.setAlpha(pages.isEmpty() ? 0.4f : 1f);
         thumbs.removeAllViews();
         if (pages.isEmpty()) { thumbs.addView(emptyHint); return; }
-        for (int i = 0; i < pages.size(); i++) addThumb(i + 1, pages.get(i));
+        LinearLayout row = null;
+        for (int i = 0; i < pages.size(); i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rp.bottomMargin = dp(10);
+                thumbs.addView(row, rp);
+            }
+            row.addView(cell(i, pages.get(i)), cellParams());
+        }
+        int rest = (3 - pages.size() % 3) % 3;
+        for (int k = 0; k < rest; k++) row.addView(new View(this), cellParams());
     }
 
-    private void addThumb(int no, File f) {
-        LinearLayout row = new LinearLayout(this);
-        row.setBackgroundColor(Color.WHITE);
-        row.setPadding(dp(10), dp(10), dp(10), dp(10));
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rp.setMargins(0, 0, 0, dp(8));
-        row.setLayoutParams(rp);
+    private LinearLayout.LayoutParams cellParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(150), 1);
+        lp.setMargins(dp(5), 0, dp(5), 0);
+        return lp;
+    }
 
+    private View cell(int idx, File f) {
+        FrameLayout box = new FrameLayout(this);
+        box.setBackgroundColor(Color.WHITE);
+        box.setPadding(dp(3), dp(3), dp(3), dp(3));
         ImageView iv = new ImageView(this);
-        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        Bitmap thumb = PdfMaker.decodeScaled(f, 200);
-        if (thumb != null) iv.setImageBitmap(thumb);
-        row.addView(iv, new LinearLayout.LayoutParams(dp(56), dp(72)));
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setBackgroundColor(0xFFE5E7EB);
+        box.addView(iv, new FrameLayout.LayoutParams(-1, -1));
+        TextView no = new TextView(this);
+        no.setText(String.valueOf(idx + 1));
+        no.setTextColor(Color.WHITE);
+        no.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        no.setBackgroundColor(0xCC2447C9);
+        no.setPadding(dp(7), dp(2), dp(7), dp(2));
+        box.addView(no, new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.BOTTOM));
 
-        TextView t = new TextView(this);
-        t.setText("  " + no + "쪽");
-        t.setTextColor(INK);
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        row.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-
-        Button del = new Button(this);
-        del.setText("삭제");
-        del.setAllCaps(false);
-        del.setTextColor(0xFFDC2626);
-        del.setBackgroundColor(0x00000000);
-        del.setOnClickListener(v -> { store.delete(f); refresh(); });
-        row.addView(del);
-
-        thumbs.addView(row);
+        final String key = f.getPath() + "#" + f.lastModified();
+        Bitmap cached = thumbCache.get(key);
+        if (cached != null) iv.setImageBitmap(cached);
+        else {
+            iv.setTag(key);
+            thumbIo.execute(() -> {
+                Bitmap t = PdfMaker.decodeScaled(f, 360);
+                if (t == null) return;
+                thumbCache.put(key, t);
+                ui.post(() -> { if (key.equals(iv.getTag())) iv.setImageBitmap(t); });
+            });
+        }
+        box.setOnClickListener(v -> startActivity(PageViewerActivity.open(this, idx)));
+        box.setOnLongClickListener(v -> {
+            new AlertDialog.Builder(this)
+                    .setMessage((idx + 1) + "쪽을 지울까요?")
+                    .setPositiveButton("삭제", (d, w) -> { store.delete(f); refresh(); })
+                    .setNegativeButton("취소", null)
+                    .show();
+            return true;
+        });
+        return box;
     }
 
     // ---------- PDF ----------

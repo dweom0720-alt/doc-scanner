@@ -28,5 +28,10 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@style/CameraTheme" />
+
+        <activity
+            android:name=".PageViewerActivity"
+            android:exported="false"
+            android:theme="@style/CameraTheme" />
     </application>
 </manifest>

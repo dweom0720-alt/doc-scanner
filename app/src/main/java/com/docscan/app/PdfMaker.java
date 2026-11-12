@@ -68,19 +68,36 @@ public final class PdfMaker {
         return r;
     }
 
+    /** PDF에 들어갈 한 장 (흑백이면 bits, 회색·컬러면 jpeg) */
+    public static final class Page {
+        public int w, h;
+        public byte[] bits, jpeg;
+        /** PDF 안에서 이 장이 차지할 대략의 크기 */
+        public long size() { return bits != null ? Core.deflate(bits).length : jpeg.length; }
+    }
+
     private static void addPage(Core.PdfWriter pw, File f, int mode) throws IOException {
+        Page p = process(f, mode);
+        if (p == null) return; // 깨진 사진은 건너뜀
+        if (p.bits != null) pw.addBilevel(p.bits, p.w, p.h);
+        else pw.addJpeg(p.jpeg, p.w, p.h);
+    }
+
+    /** 사진 한 장 → PDF에 실제로 들어갈 결과 (미리보기도 이것을 그대로 씀) */
+    public static Page process(File f, int mode) {
         Bitmap bmp = decodeScaled(f, targetLong(mode));
-        if (bmp == null) return; // 깨진 사진은 건너뜀
+        if (bmp == null) return null;
         int w = bmp.getWidth(), h = bmp.getHeight();
         int[] px = new int[w * h];
         bmp.getPixels(px, 0, w, 0, 0, w, h);
+        Page p = new Page();
+        p.w = w; p.h = h;
 
         if (mode == MODE_BW) {
             bmp.recycle();
             int[] gray = Core.toGray(px);
-            px = null;
-            pw.addBilevel(Core.binarize(gray, w, h), w, h);
-            return;
+            p.bits = Core.binarize(gray, w, h);
+            return p;
         }
 
         int quality;
@@ -99,7 +116,21 @@ public final class PdfMaker {
         ByteArrayOutputStream jpg = new ByteArrayOutputStream(256 * 1024);
         out.compress(Bitmap.CompressFormat.JPEG, quality, jpg);
         out.recycle();
-        pw.addJpeg(jpg.toByteArray(), w, h);
+        p.jpeg = jpg.toByteArray();
+        return p;
+    }
+
+    /** PDF 결과를 화면에 보여줄 비트맵으로 */
+    public static Bitmap render(Page p) {
+        if (p.jpeg != null) return BitmapFactory.decodeByteArray(p.jpeg, 0, p.jpeg.length);
+        int[] px = new int[p.w * p.h];
+        int rowBytes = (p.w + 7) / 8;
+        for (int y = 0; y < p.h; y++) {
+            int ro = y * rowBytes, po = y * p.w;
+            for (int x = 0; x < p.w; x++)
+                px[po + x] = (p.bits[ro + (x >> 3)] & (0x80 >> (x & 7))) != 0 ? 0xFFFFFFFF : 0xFF000000;
+        }
+        return Bitmap.createBitmap(px, p.w, p.h, Bitmap.Config.ARGB_8888);
     }
 
     /** 긴 변이 target 이하가 되도록 줄여서 읽기 */

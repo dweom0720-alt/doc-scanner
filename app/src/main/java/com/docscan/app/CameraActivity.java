@@ -175,6 +175,10 @@ public class CameraActivity extends AppCompatActivity {
         lastThumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
         lastThumb.setBackgroundColor(0xFF374151);
         right.addView(lastThumb, new LinearLayout.LayoutParams(dp(44), dp(58)));
+        lastThumb.setOnClickListener(v -> {
+            int n = store.count();
+            if (n > 0) startActivity(PageViewerActivity.open(this, n - 1));
+        });
         doneBtn = new TextView(this);
         doneBtn.setTextColor(Color.WHITE);
         doneBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
