@@ -5,4 +5,8 @@
         <item name="colorPrimaryDark">#1C39A3</item>
         <item name="colorAccent">#2447C9</item>
     </style>
+    <style name="CameraTheme" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

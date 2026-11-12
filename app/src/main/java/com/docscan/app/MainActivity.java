@@ -23,18 +23,11 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.IntentSenderRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.FileProvider;
 
-import com.google.android.gms.tasks.Task;
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanner;
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions;
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanning;
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult;
+import org.opencv.android.OpenCVLoader;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -56,14 +49,19 @@ public class MainActivity extends AppCompatActivity {
     private Button[] modeBtns;
     private Button makeBtn;
 
-    private ActivityResultLauncher<IntentSenderRequest> scanLauncher;
+    private ActivityResultLauncher<String> pickLauncher;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        OpenCVLoader.initLocal();
         store = new PageStore(this);
-        scanLauncher = registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(),
-                this::onScanned);
+        pickLauncher = registerForActivityResult(new ActivityResultContracts.GetMultipleContents(), this::importImages);
         setContentView(buildUi());
+        refresh();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
         refresh();
     }
 
@@ -81,7 +79,15 @@ public class MainActivity extends AppCompatActivity {
         title.setTextColor(Color.WHITE);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        bar.addView(title);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        TextView imp = new TextView(this);
+        imp.setText("사진 불러오기");
+        imp.setTextColor(Color.WHITE);
+        imp.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        imp.setPadding(dp(10), dp(6), 0, dp(6));
+        imp.setOnClickListener(v -> pickLauncher.launch("image/*"));
+        bar.addView(imp);
         root.addView(bar);
 
         // 모드 선택
@@ -122,7 +128,7 @@ public class MainActivity extends AppCompatActivity {
         thumbs.setOrientation(LinearLayout.VERTICAL);
         thumbs.setPadding(dp(16), 0, dp(16), dp(16));
         emptyHint = new TextView(this);
-        emptyHint.setText("\n아래 '사진 찍기'를 눌러 문서를 촬영하세요.\n여러 장을 연속으로 찍을 수 있고,\n배경은 자동으로 잘려 나갑니다.\n");
+        emptyHint.setText("\n아래 '사진 찍기'를 누르고 문서를 비추기만 하세요.\n테두리를 자동으로 잡아 저절로 찍고, 문서만 잘라 담습니다.\n다음 장을 올려놓으면 또 찍습니다.\n");
         emptyHint.setTextColor(SUB);
         emptyHint.setGravity(Gravity.CENTER);
         emptyHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
@@ -158,41 +164,58 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // ---------- 스캔 ----------
+    // ---------- 촬영 / 불러오기 ----------
     private void startScan() {
-        GmsDocumentScannerOptions opts = new GmsDocumentScannerOptions.Builder()
-                .setGalleryImportAllowed(true)
-                .setPageLimit(100)
-                .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
-                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-                .build();
-        GmsDocumentScanner scanner = GmsDocumentScanning.getClient(opts);
-        scanner.getStartScanIntent(this)
-                .addOnSuccessListener(is -> {
-                    try {
-                        scanLauncher.launch(new IntentSenderRequest.Builder(is).build());
-                    } catch (Exception e) {
-                        toast("스캐너를 열 수 없습니다: " + e.getMessage());
-                    }
-                })
-                .addOnFailureListener(e -> toast("스캐너를 사용할 수 없습니다. Play 서비스를 업데이트해 주세요."));
+        startActivity(new Intent(this, CameraActivity.class));
     }
 
-    private void onScanned(ActivityResult ar) {
-        if (ar.getResultCode() != Activity.RESULT_OK) return;
-        GmsDocumentScanningResult r = GmsDocumentScanningResult.fromActivityResultIntent(ar.getData());
-        if (r == null || r.getPages() == null) return;
-        List<Uri> uris = new ArrayList<>();
-        for (GmsDocumentScanningResult.Page p : r.getPages()) uris.add(p.getImageUri());
+    private void importImages(List<Uri> uris) {
+        if (uris == null || uris.isEmpty()) return;
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("문서 자르는 중…")
+                .setMessage("0 / " + uris.size())
+                .setCancelable(false).create();
+        dlg.show();
         io.execute(() -> {
-            int ok = 0;
+            int ok = 0, i = 0;
             for (Uri u : uris) {
-                try { store.add(getContentResolver(), u); ok++; }
-                catch (Exception ignored) {}
+                i++;
+                try {
+                    Bitmap src = readImage(u);
+                    if (src != null) {
+                        Bitmap page = Cropper.crop(src, null);
+                        if (page != src) src.recycle();
+                        store.save(page);
+                        page.recycle();
+                        ok++;
+                    }
+                } catch (Throwable ignored) {}
+                final int done = i;
+                ui.post(() -> dlg.setMessage(done + " / " + uris.size()));
             }
-            int finalOk = ok;
-            ui.post(() -> { refresh(); toast(finalOk + "장 추가됨"); });
+            final int n = ok;
+            ui.post(() -> { dlg.dismiss(); refresh(); toast(n + "장 추가됨"); });
         });
+    }
+
+    /** 갤러리 사진 읽기 (사진 방향 정보 반영) */
+    private Bitmap readImage(Uri u) throws java.io.IOException {
+        byte[] data;
+        try (java.io.InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null) return null;
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[65536];
+            int k;
+            while ((k = in.read(buf)) > 0) bos.write(buf, 0, k);
+            data = bos.toByteArray();
+        }
+        int rot = 0;
+        try {
+            android.media.ExifInterface ex = new android.media.ExifInterface(new java.io.ByteArrayInputStream(data));
+            int o = ex.getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1);
+            rot = o == 6 ? 90 : o == 3 ? 180 : o == 8 ? 270 : 0;
+        } catch (Exception ignored) {}
+        return Cropper.decode(data, rot, 3200);
     }
 
     // ---------- 목록 ----------

@@ -46,6 +46,18 @@ public final class PageStore {
         return f;
     }
 
+    public synchronized File save(android.graphics.Bitmap bmp) throws IOException {
+        long n = sp.getLong("seq", 0) + 1;
+        sp.edit().putLong("seq", n).apply();
+        File f = new File(dir, String.format(Locale.US, "%08d.jpg", n));
+        try (OutputStream out = new java.io.BufferedOutputStream(new FileOutputStream(f))) {
+            bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out);
+        }
+        return f;
+    }
+
+    public synchronized int count() { return list().size(); }
+
     public synchronized void delete(File f) { f.delete(); }
 
     public synchronized void deleteAll(List<File> fs) { for (File f : fs) f.delete(); }

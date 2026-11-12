@@ -2,8 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 스캔한 사진과 PDF는 모두 폰 안에서만 처리됩니다.
-         인터넷 권한이 없어 어떤 데이터도 폰 밖으로 나갈 수 없습니다.
-         카메라 권한도 필요 없습니다(구글 Play 스캐너가 대신 처리). -->
+         인터넷 권한이 없어 어떤 데이터도 폰 밖으로 나갈 수 없습니다. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
 
     <application
         android:allowBackup="false"
@@ -20,5 +22,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".CameraActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:theme="@style/CameraTheme" />
     </application>
 </manifest>
