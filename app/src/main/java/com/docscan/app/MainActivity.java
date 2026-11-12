@@ -1,0 +1,310 @@
+package com.docscan.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.content.IntentSender;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.IntentSenderRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.FileProvider;
+
+import com.google.android.gms.tasks.Task;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanner;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanning;
+import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MainActivity extends AppCompatActivity {
+    private static final int BLUE = 0xFF2447C9, BG = 0xFFF2F3F7, INK = 0xFF1A1C22, SUB = 0xFF6B7280;
+
+    private PageStore store;
+    private int mode = PdfMaker.MODE_BW;
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+
+    private LinearLayout thumbs;
+    private TextView countLabel, emptyHint;
+    private Button[] modeBtns;
+    private Button makeBtn;
+
+    private ActivityResultLauncher<IntentSenderRequest> scanLauncher;
+
+    @Override protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        store = new PageStore(this);
+        scanLauncher = registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(),
+                this::onScanned);
+        setContentView(buildUi());
+        refresh();
+    }
+
+    // ---------- 화면 ----------
+    private View buildUi() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setBackgroundColor(BLUE);
+        bar.setPadding(dp(20), dp(16), dp(20), dp(16));
+        TextView title = new TextView(this);
+        title.setText("문서스캔");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        bar.addView(title);
+        root.addView(bar);
+
+        // 모드 선택
+        LinearLayout modeRow = new LinearLayout(this);
+        modeRow.setPadding(dp(16), dp(16), dp(16), dp(6));
+        String[] names = {"흑백(가장 작음)", "회색", "컬러"};
+        modeBtns = new Button[3];
+        for (int i = 0; i < 3; i++) {
+            Button mb = new Button(this);
+            mb.setAllCaps(false);
+            mb.setText(names[i]);
+            mb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            final int m = i;
+            mb.setOnClickListener(v -> { mode = m; paintModes(); });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+            lp.setMargins(dp(4), 0, dp(4), 0);
+            modeRow.addView(mb, lp);
+            modeBtns[i] = mb;
+        }
+        root.addView(modeRow);
+
+        TextView modeHint = new TextView(this);
+        modeHint.setText("글자 문서는 흑백이 가장 작고 또렷합니다. 도장·서명·표의 색이 필요하면 컬러를 쓰세요.");
+        modeHint.setTextColor(SUB);
+        modeHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        modeHint.setPadding(dp(22), 0, dp(22), dp(12));
+        root.addView(modeHint);
+
+        countLabel = new TextView(this);
+        countLabel.setTextColor(INK);
+        countLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        countLabel.setTypeface(countLabel.getTypeface(), android.graphics.Typeface.BOLD);
+        countLabel.setPadding(dp(22), dp(4), dp(22), dp(8));
+        root.addView(countLabel);
+
+        ScrollView sv = new ScrollView(this);
+        thumbs = new LinearLayout(this);
+        thumbs.setOrientation(LinearLayout.VERTICAL);
+        thumbs.setPadding(dp(16), 0, dp(16), dp(16));
+        emptyHint = new TextView(this);
+        emptyHint.setText("\n아래 '사진 찍기'를 눌러 문서를 촬영하세요.\n여러 장을 연속으로 찍을 수 있고,\n배경은 자동으로 잘려 나갑니다.\n");
+        emptyHint.setTextColor(SUB);
+        emptyHint.setGravity(Gravity.CENTER);
+        emptyHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        thumbs.addView(emptyHint);
+        sv.addView(thumbs);
+        root.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+        // 하단 버튼
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setPadding(dp(16), dp(10), dp(16), dp(16));
+        btnRow.setBackgroundColor(Color.WHITE);
+        Button scan = bigButton("사진 찍기", BLUE, Color.WHITE);
+        scan.setOnClickListener(v -> startScan());
+        makeBtn = bigButton("PDF 만들기", 0xFF17A34A, Color.WHITE);
+        makeBtn.setOnClickListener(v -> makePdf());
+        LinearLayout.LayoutParams l1 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        l1.setMargins(dp(4), 0, dp(4), 0);
+        LinearLayout.LayoutParams l2 = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        l2.setMargins(dp(4), 0, dp(4), 0);
+        btnRow.addView(scan, l1);
+        btnRow.addView(makeBtn, l2);
+        root.addView(btnRow);
+
+        paintModes();
+        return root;
+    }
+
+    private void paintModes() {
+        for (int i = 0; i < 3; i++) {
+            boolean on = i == mode;
+            modeBtns[i].setBackgroundColor(on ? BLUE : 0xFFE5E7EB);
+            modeBtns[i].setTextColor(on ? Color.WHITE : INK);
+        }
+    }
+
+    // ---------- 스캔 ----------
+    private void startScan() {
+        GmsDocumentScannerOptions opts = new GmsDocumentScannerOptions.Builder()
+                .setGalleryImportAllowed(true)
+                .setPageLimit(100)
+                .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
+                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
+                .build();
+        GmsDocumentScanner scanner = GmsDocumentScanning.getClient(opts);
+        scanner.getStartScanIntent(this)
+                .addOnSuccessListener(is -> {
+                    try {
+                        scanLauncher.launch(new IntentSenderRequest.Builder(is).build());
+                    } catch (Exception e) {
+                        toast("스캐너를 열 수 없습니다: " + e.getMessage());
+                    }
+                })
+                .addOnFailureListener(e -> toast("스캐너를 사용할 수 없습니다. Play 서비스를 업데이트해 주세요."));
+    }
+
+    private void onScanned(ActivityResult ar) {
+        if (ar.getResultCode() != Activity.RESULT_OK) return;
+        GmsDocumentScanningResult r = GmsDocumentScanningResult.fromActivityResultIntent(ar.getData());
+        if (r == null || r.getPages() == null) return;
+        List<Uri> uris = new ArrayList<>();
+        for (GmsDocumentScanningResult.Page p : r.getPages()) uris.add(p.getImageUri());
+        io.execute(() -> {
+            int ok = 0;
+            for (Uri u : uris) {
+                try { store.add(getContentResolver(), u); ok++; }
+                catch (Exception ignored) {}
+            }
+            int finalOk = ok;
+            ui.post(() -> { refresh(); toast(finalOk + "장 추가됨"); });
+        });
+    }
+
+    // ---------- 목록 ----------
+    private void refresh() {
+        List<File> pages = store.list();
+        countLabel.setText("담긴 페이지 " + pages.size() + "장");
+        makeBtn.setEnabled(!pages.isEmpty());
+        makeBtn.setAlpha(pages.isEmpty() ? 0.4f : 1f);
+        thumbs.removeAllViews();
+        if (pages.isEmpty()) { thumbs.addView(emptyHint); return; }
+        for (int i = 0; i < pages.size(); i++) addThumb(i + 1, pages.get(i));
+    }
+
+    private void addThumb(int no, File f) {
+        LinearLayout row = new LinearLayout(this);
+        row.setBackgroundColor(Color.WHITE);
+        row.setPadding(dp(10), dp(10), dp(10), dp(10));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rp.setMargins(0, 0, 0, dp(8));
+        row.setLayoutParams(rp);
+
+        ImageView iv = new ImageView(this);
+        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        Bitmap thumb = PdfMaker.decodeScaled(f, 200);
+        if (thumb != null) iv.setImageBitmap(thumb);
+        row.addView(iv, new LinearLayout.LayoutParams(dp(56), dp(72)));
+
+        TextView t = new TextView(this);
+        t.setText("  " + no + "쪽");
+        t.setTextColor(INK);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        row.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        Button del = new Button(this);
+        del.setText("삭제");
+        del.setAllCaps(false);
+        del.setTextColor(0xFFDC2626);
+        del.setBackgroundColor(0x00000000);
+        del.setOnClickListener(v -> { store.delete(f); refresh(); });
+        row.addView(del);
+
+        thumbs.addView(row);
+    }
+
+    // ---------- PDF ----------
+    private void makePdf() {
+        List<File> pages = store.list();
+        if (pages.isEmpty()) return;
+        String name = "스캔_" + new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", Locale.KOREA).format(new java.util.Date()) + ".pdf";
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("PDF 만드는 중…")
+                .setMessage("0 / " + pages.size())
+                .setCancelable(false).create();
+        dlg.show();
+
+        io.execute(() -> {
+            try {
+                PdfMaker.Result res = PdfMaker.make(this, pages, mode, name,
+                        (done, total) -> ui.post(() -> dlg.setMessage(done + " / " + total)));
+                store.deleteAll(pages);
+                ui.post(() -> { dlg.dismiss(); refresh(); showDone(res); });
+            } catch (Exception e) {
+                ui.post(() -> { dlg.dismiss(); toast("실패: " + e.getMessage()); });
+            }
+        });
+    }
+
+    private void showDone(PdfMaker.Result res) {
+        String size = res.bytes < 1024 * 1024
+                ? (res.bytes / 1024) + " KB"
+                : String.format(Locale.US, "%.1f MB", res.bytes / 1024f / 1024f);
+        new AlertDialog.Builder(this)
+                .setTitle("저장 완료")
+                .setMessage(res.name + "\n\n" + res.pages + "쪽 · " + size + "\n위치: 다운로드 / 문서스캔")
+                .setPositiveButton("공유", (d, w) -> share(res.uri))
+                .setNegativeButton("열기", (d, w) -> open(res.uri))
+                .setNeutralButton("닫기", null)
+                .show();
+    }
+
+    private void share(Uri uri) {
+        Intent i = new Intent(Intent.ACTION_SEND);
+        i.setType("application/pdf");
+        i.putExtra(Intent.EXTRA_STREAM, uri);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivity(Intent.createChooser(i, "PDF 공유"));
+    }
+
+    private void open(Uri uri) {
+        Intent i = new Intent(Intent.ACTION_VIEW);
+        i.setDataAndType(uri, "application/pdf");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { startActivity(i); } catch (Exception e) { toast("PDF 뷰어가 없습니다"); }
+    }
+
+    // ---------- 도우미 ----------
+    private Button bigButton(String text, int bg, int fg) {
+        Button b = new Button(this);
+        b.setAllCaps(false);
+        b.setText(text);
+        b.setTextColor(fg);
+        b.setBackgroundColor(bg);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        b.setPadding(0, dp(14), 0, dp(14));
+        return b;
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
+    }
+
+    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+}
