@@ -27,14 +27,27 @@ public final class DocDetector {
     private DocDetector() {}
 
     /** @return 좌상·우상·우하·좌하 순서의 네 점(입력 이미지 좌표), 못 찾으면 null */
-    public static Point[] detect(Mat rgb, int workSize) {
+    public static Point[] detect(Mat rgb, int workSize) { return detect(rgb, workSize, false); }
+
+    /**
+     * @param screen 모니터 모드: 화면 안의 문서(더 하얀 사각형)를 우선하고,
+     *               못 찾으면 모니터 화면 전체라도 잡는다
+     */
+    public static Point[] detect(Mat rgb, int workSize, boolean screen) {
+        if (!screen) return core(rgb, workSize, false, true);
+        Point[] q = core(rgb, workSize, true, true);
+        if (q == null) q = core(rgb, workSize, true, false);
+        return q;
+    }
+
+    private static Point[] core(Mat rgb, int workSize, boolean screen, boolean needPaper) {
         int W = rgb.cols(), H = rgb.rows();
         double s = Math.min(1.0, (double) workSize / Math.max(W, H));
         Mat sm = new Mat();
         if (s < 1.0) Imgproc.resize(rgb, sm, new Size(Math.round(W * s), Math.round(H * s)), 0, 0, Imgproc.INTER_AREA);
         else rgb.copyTo(sm);
         int w = sm.cols(), h = sm.rows();
-        double amin = 0.12 * w * h;
+        double amin = (screen ? 0.05 : 0.12) * w * h;
 
         Mat gray = new Mat();
         Imgproc.cvtColor(sm, gray, Imgproc.COLOR_RGB2GRAY);
@@ -95,10 +108,17 @@ public final class DocDetector {
         Core.subtract(mx, mn, sat);
         double thr = percentile(mn, 0.6);
         double paperMin = Math.min(thr, 170) * 0.75;
-        Mat lowSat = new Mat(), bright = new Mat(), paper = new Mat();
-        Imgproc.threshold(sat, lowSat, 44, 1, Imgproc.THRESH_BINARY_INV);
-        Imgproc.threshold(mn, bright, Math.ceil(paperMin) - 1, 1, Imgproc.THRESH_BINARY);
-        Core.bitwise_and(lowSat, bright, paper);
+        byte[] mnBuf = new byte[w * h], mxBuf = new byte[w * h], pBuf = new byte[w * h];
+        mn.get(0, 0, mnBuf);
+        mx.get(0, 0, mxBuf);
+        for (int i = 0; i < pBuf.length; i++) {
+            int lo = mnBuf[i] & 255, hi = mxBuf[i] & 255;
+            double satMax = screen ? Math.max(45, 0.22 * hi) : 45;
+            pBuf[i] = (byte) ((hi - lo) < satMax && lo >= paperMin ? 1 : 0);
+        }
+        Mat lowSat = new Mat(), bright = new Mat();
+        Mat paper = new Mat(h, w, CvType.CV_8UC1);
+        paper.put(0, 0, pBuf);
 
         Mat pm = new Mat();
         Core.multiply(paper, new Scalar(255), pm);
@@ -108,8 +128,7 @@ public final class DocDetector {
 
         // 같은 후보 정리
         Set<String> seen = new HashSet<>();
-        Point[] best = null;
-        double bestScore = 0;
+        List<Cand> valid = new ArrayList<>();
         Mat mask = Mat.zeros(h, w, CvType.CV_8UC1);
         Mat inter = new Mat();
         for (Point[] q0 : cands) {
@@ -134,14 +153,52 @@ public final class DocDetector {
             int inside = Core.countNonZero(mask);
             Core.bitwise_and(paper, mask, inter);
             double pf = Core.countNonZero(inter) / (double) Math.max(1, inside);
-            if (pf < 0.5) continue;
+            if (needPaper && pf < 0.5) continue;
 
             double avg = sum(sup) / 4;
-            double score = a * avg * avg * avg * minSup * pf * pf * pf;
-            if (score > bestScore) { bestScore = score; best = q; }
+            double score = a * avg * avg * avg * minSup * (needPaper ? pf * pf * pf : 1);
+            boolean dup = false;
+            for (Cand c : valid) {
+                if (sameQuad(c.q, q, w, h)) { dup = true; if (score > c.score) { c.q = q; c.score = score; c.mask = maskBytes(mask, w, h); c.count = inside; } break; }
+            }
+            if (!dup) {
+                Cand c = new Cand();
+                c.q = q; c.score = score; c.mask = maskBytes(mask, w, h); c.count = inside;
+                valid.add(c);
+            }
         }
 
+        // 모니터 모드: 큰 사각형(화면·창) 안에 경계가 또렷한 더 하얀 사각형(문서)이 있으면 바깥 것은 탈락
+        if (screen && needPaper && valid.size() > 1) {
+            Mat mnsM = new Mat();
+            Imgproc.GaussianBlur(mn, mnsM, new Size(5, 5), 0);
+            byte[] mns = new byte[w * h];
+            mnsM.get(0, 0, mns);
+            mnsM.release();
+            for (Cand A : valid) {
+                for (Cand B : valid) {
+                    if (A == B) continue;
+                    if (B.count > 0.9 * A.count || B.count < 0.15 * A.count) continue;
+                    int out = 0, ring = 0;
+                    int[] hb = new int[256], hr = new int[256];
+                    for (int i = 0; i < w * h; i++) {
+                        boolean ia = A.mask[i] != 0, ib = B.mask[i] != 0;
+                        if (ib && !ia) out++;
+                        if (ib) hb[mnBuf[i] & 255]++;
+                        else if (ia) { ring++; hr[mnBuf[i] & 255]++; }
+                    }
+                    if (out > 0.08 * B.count || ring < 0.05 * A.count) continue;
+                    if (histMedian(hb, B.count) > histMedian(hr, ring) * 1.06 + 2 && stepOk(B.q, A.mask, mns, w, h))
+                        A.score *= 0.05;
+                }
+            }
+        }
+        Point[] best = null;
+        double bestScore = 0;
+        for (Cand c : valid) if (c.score > bestScore) { bestScore = c.score; best = c.q; }
+
         releaseAll(sm, gray, mn, mx, eg, em, tmp, raw, edges, nz, sat, lowSat, bright, paper, pm, mask, inter, k3, k5, k9);
+        valid.clear();
         for (Mat m : ch) m.release();
 
         if (best == null) return null;
@@ -197,6 +254,74 @@ public final class DocDetector {
     }
 
     // ---------- 내부 ----------
+
+    private static final class Cand { Point[] q; double score; byte[] mask; int count; }
+
+    private static byte[] maskBytes(Mat m, int w, int h) {
+        byte[] b = new byte[w * h];
+        m.get(0, 0, b);
+        return b;
+    }
+
+    private static boolean sameQuad(Point[] a, Point[] b, int w, int h) {
+        double tol = 0.02 * Math.hypot(w, h);
+        for (Point p : a) {
+            double best = Double.MAX_VALUE;
+            for (Point q : b) best = Math.min(best, Math.hypot(p.x - q.x, p.y - q.y));
+            if (best > tol) return false;
+        }
+        return true;
+    }
+
+    private static double histMedian(int[] hist, int n) {
+        long acc = 0, target = n / 2;
+        for (int v = 0; v < 256; v++) { acc += hist[v]; if (acc > target) return v; }
+        return 255;
+    }
+
+    private static double median(List<Double> v) {
+        Collections.sort(v);
+        int n = v.size();
+        return n % 2 == 1 ? v.get(n / 2) : (v.get(n / 2 - 1) + v.get(n / 2)) / 2.0;
+    }
+
+    /** 안쪽 사각형의 변이 '또렷한' 밝기 계단인지(화면 속 문서 테두리) — 조명 얼룩처럼 서서히 변하면 아님 */
+    private static boolean stepOk(Point[] q, byte[] inA, byte[] mns, int w, int h) {
+        double cx = 0, cy = 0;
+        for (Point p : q) { cx += p.x / 4; cy += p.y / 4; }
+        int nSides = 0, nStep = 0;
+        for (int i = 0; i < 4; i++) {
+            Point p0 = q[i], p1 = q[(i + 1) % 4];
+            double dx = p1.x - p0.x, dy = p1.y - p0.y, L = Math.hypot(dx, dy) + 1e-6;
+            double nx = -dy / L, ny = dx / L;
+            double mx = (p0.x + p1.x) / 2, my = (p0.y + p1.y) / 2;
+            if ((cx - mx) * nx + (cy - my) * ny < 0) { nx = -nx; ny = -ny; }
+            List<Double> i2 = new ArrayList<>(), o2 = new ArrayList<>(), i8 = new ArrayList<>(), o8 = new ArrayList<>();
+            int shared = 0;
+            for (int t = 0; t < 40; t++) {
+                double f = 0.1 + 0.8 * (t + 0.5) / 40;
+                double px = p0.x + dx * f, py = p0.y + dy * f;
+                int obx = (int) (px - nx * 8), oby = (int) (py - ny * 8);
+                if (obx < 0 || obx >= w || oby < 0 || oby >= h || inA[oby * w + obx] == 0) { shared++; continue; }
+                int a = px(mns, w, h, px + nx * 3, py + ny * 3), b = px(mns, w, h, px - nx * 3, py - ny * 3);
+                int c = px(mns, w, h, px + nx * 9, py + ny * 9), d = px(mns, w, h, px - nx * 9, py - ny * 9);
+                if (a < 0 || b < 0 || c < 0 || d < 0) continue;
+                i2.add((double) a); o2.add((double) b); i8.add((double) c); o8.add((double) d);
+            }
+            if (shared > 20 || i2.size() < 10) continue;
+            nSides++;
+            double mo2 = median(o2);
+            double near = median(i2) - mo2, far = median(i8) - median(o8);
+            if (near >= Math.max(6, 0.04 * mo2) && near >= 0.6 * far) nStep++;
+        }
+        return nSides >= 1 && nStep * 2 >= nSides;
+    }
+
+    private static int px(byte[] m, int w, int h, double x, double y) {
+        int ix = (int) Math.round(x), iy = (int) Math.round(y);
+        if (ix < 0 || ix >= w || iy < 0 || iy >= h) return -1;
+        return m[iy * w + ix] & 255;
+    }
 
     private static void collect(Mat bin, int mode, double amin, List<Point[]> out) {
         List<MatOfPoint> cs = new ArrayList<>();

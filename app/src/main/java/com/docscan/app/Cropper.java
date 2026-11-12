@@ -20,14 +20,17 @@ public final class Cropper {
      * @param fallbackRel 사진에서 못 찾았을 때 쓸 미리보기 모서리(0~1 비율 좌표), 없으면 null
      * @return 잘라낸 비트맵. 문서를 끝내 못 찾으면 원본을 줄여서 그대로 돌려줌
      */
-    public static Bitmap crop(Bitmap src, double[] fallbackRel) {
+    public static Bitmap crop(Bitmap src, double[] fallbackRel) { return crop(src, fallbackRel, false); }
+
+    /** @param screen 모니터 촬영: 화면 속 문서(없으면 화면 전체)를 잡고, 물결무늬(모아레)를 살짝 눌러 줌 */
+    public static Bitmap crop(Bitmap src, double[] fallbackRel, boolean screen) {
         Mat rgba = new Mat();
         Utils.bitmapToMat(src, rgba);
         Mat rgb = new Mat();
         Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB);
         rgba.release();
 
-        Point[] q = DocDetector.detect(rgb, 800);
+        Point[] q = DocDetector.detect(rgb, 800, screen);
         if (q == null && fallbackRel != null) {
             q = new Point[4];
             for (int i = 0; i < 4; i++)
@@ -41,6 +44,7 @@ public final class Cropper {
         } else {
             out = rgb;
         }
+        if (screen) Imgproc.GaussianBlur(out, out, new org.opencv.core.Size(3, 3), 0);
         Bitmap bmp = Bitmap.createBitmap(out.cols(), out.rows(), Bitmap.Config.ARGB_8888);
         Utils.matToBitmap(out, bmp);
         out.release();

@@ -183,7 +183,7 @@ public class MainActivity extends AppCompatActivity {
                 try {
                     Bitmap src = readImage(u);
                     if (src != null) {
-                        Bitmap page = Cropper.crop(src, null);
+                        Bitmap page = Cropper.crop(src, null, getSharedPreferences("camera", MODE_PRIVATE).getBoolean("screen", false));
                         if (page != src) src.recycle();
                         store.save(page);
                         page.recycle();

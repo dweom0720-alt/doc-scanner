@@ -68,7 +68,9 @@ public class CameraActivity extends AppCompatActivity {
     private Overlay overlay;
     private TextView status, doneBtn;
     private ImageView lastThumb;
-    private Button autoBtn, torchBtn;
+    private Button torchBtn;
+    private TextView modeAuto, modeManual, kindPaper, kindScreen;
+    private android.content.SharedPreferences prefs;
 
     private ImageCapture capture;
     private Camera camera;
@@ -77,7 +79,7 @@ public class CameraActivity extends AppCompatActivity {
     private PageStore store;
 
     // 분석 스레드 상태
-    private volatile boolean auto = true, capturing = false, torch = false;
+    private volatile boolean auto = true, screen = false, capturing = false, torch = false;
     private double[] prevRel;
     private volatile long stableSince = -1, cooldownUntil = 0;
     private volatile float[] lastPrint;
@@ -89,6 +91,9 @@ public class CameraActivity extends AppCompatActivity {
         super.onCreate(b);
         OpenCVLoader.initLocal();
         store = new PageStore(this);
+        prefs = getSharedPreferences("camera", MODE_PRIVATE);
+        auto = prefs.getBoolean("auto", true);
+        screen = prefs.getBoolean("screen", false);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(buildUi());
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCamera();
@@ -121,7 +126,26 @@ public class CameraActivity extends AppCompatActivity {
         status.setBackgroundColor(0x99000000);
         status.setPadding(dp(16), dp(14), dp(16), dp(14));
         status.setText("문서를 화면에 비추세요");
-        root.addView(status, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.VERTICAL);
+        top.addView(status, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout switches = new LinearLayout(this);
+        switches.setGravity(Gravity.CENTER);
+        switches.setPadding(dp(10), dp(8), dp(10), dp(8));
+        switches.setBackgroundColor(0x66000000);
+        modeAuto = seg("자동 촬영"); modeManual = seg("수동 촬영");
+        kindPaper = seg("종이"); kindScreen = seg("모니터");
+        modeAuto.setOnClickListener(v -> setAuto(true));
+        modeManual.setOnClickListener(v -> setAuto(false));
+        kindPaper.setOnClickListener(v -> setScreen(false));
+        kindScreen.setOnClickListener(v -> setScreen(true));
+        switches.addView(group(modeAuto, modeManual));
+        View gap = new View(this);
+        switches.addView(gap, new LinearLayout.LayoutParams(dp(14), 1));
+        switches.addView(group(kindPaper, kindScreen));
+        top.addView(switches, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
 
         LinearLayout bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
@@ -130,14 +154,10 @@ public class CameraActivity extends AppCompatActivity {
 
         LinearLayout left = new LinearLayout(this);
         left.setOrientation(LinearLayout.VERTICAL);
-        autoBtn = smallBtn("자동 켬");
-        autoBtn.setOnClickListener(v -> { auto = !auto; paintAuto(); });
         torchBtn = smallBtn("조명 끔");
+        torchBtn.setBackgroundColor(0xFF4B5563);
         torchBtn.setOnClickListener(v -> toggleTorch());
-        left.addView(autoBtn);
-        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-2, -2);
-        tl.topMargin = dp(8);
-        left.addView(torchBtn, tl);
+        left.addView(torchBtn);
         bar.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
 
         View shutter = new View(this);
@@ -164,7 +184,7 @@ public class CameraActivity extends AppCompatActivity {
         bar.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
 
         root.addView(bar, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
-        paintAuto();
+        paintModes();
         updateDone();
         return root;
     }
@@ -181,10 +201,56 @@ public class CameraActivity extends AppCompatActivity {
         return b;
     }
 
-    private void paintAuto() {
-        autoBtn.setText(auto ? "자동 켬" : "자동 끔");
-        autoBtn.setBackgroundColor(auto ? 0xFF16A34A : 0xFF4B5563);
-        if (!auto) status.setText("자동 촬영 꺼짐 — 가운데 버튼으로 찍으세요");
+    private TextView seg(String t) {
+        TextView v = new TextView(this);
+        v.setText(t);
+        v.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        v.setGravity(Gravity.CENTER);
+        v.setPadding(dp(14), dp(8), dp(14), dp(8));
+        return v;
+    }
+
+    private LinearLayout group(TextView a, TextView b) {
+        LinearLayout g = new LinearLayout(this);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF1F2937);
+        bg.setCornerRadius(dp(20));
+        g.setBackground(bg);
+        g.setPadding(dp(3), dp(3), dp(3), dp(3));
+        g.addView(a);
+        g.addView(b);
+        return g;
+    }
+
+    private void paintSeg(TextView v, boolean on) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(on ? 0xFF2447C9 : 0x00000000);
+        bg.setCornerRadius(dp(18));
+        v.setBackground(bg);
+        v.setTextColor(on ? Color.WHITE : 0xFFD1D5DB);
+        v.setTypeface(null, on ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+    }
+
+    private void paintModes() {
+        paintSeg(modeAuto, auto); paintSeg(modeManual, !auto);
+        paintSeg(kindPaper, !screen); paintSeg(kindScreen, screen);
+    }
+
+    private void setAuto(boolean a) {
+        auto = a;
+        stableSince = -1;
+        prefs.edit().putBoolean("auto", a).apply();
+        paintModes();
+        status.setText(a ? "자동 촬영: 문서를 비추고 잠깐 멈추면 저절로 찍어요" : "수동 촬영: 가운데 버튼을 누를 때만 찍어요");
+    }
+
+    private void setScreen(boolean s) {
+        screen = s;
+        stableSince = -1;
+        prevRel = null;
+        prefs.edit().putBoolean("screen", s).apply();
+        paintModes();
+        status.setText(s ? "모니터 모드: 화면 속 문서를 찾아요 (못 찾으면 화면 전체)" : "종이 모드: 책상 위 종이 문서를 찾아요");
     }
 
     private void toggleTorch() {
@@ -266,7 +332,8 @@ public class CameraActivity extends AppCompatActivity {
                 rgb = r;
             }
             int fw = rgb.cols(), fh = rgb.rows();
-            Point[] q = DocDetector.detect(rgb, 480);
+            final boolean scr = screen;
+            Point[] q = DocDetector.detect(rgb, 480, scr);
             long now = SystemClock.uptimeMillis();
 
             double[] rel = null;
@@ -292,8 +359,9 @@ public class CameraActivity extends AppCompatActivity {
             String msg;
             boolean shoot = false;
             if (capturing) msg = "찍는 중…";
-            else if (rel == null) msg = auto ? "문서를 화면에 비추세요" : "자동 촬영 꺼짐 — 가운데 버튼으로 찍으세요";
-            else if (!auto) msg = "문서 인식됨 — 가운데 버튼으로 찍으세요";
+            else if (rel == null) msg = scr ? (auto ? "모니터 화면을 비추세요" : "수동 촬영 — 가운데 버튼으로 찍으세요")
+                                            : (auto ? "문서를 화면에 비추세요" : "수동 촬영 — 가운데 버튼으로 찍으세요");
+            else if (!auto) msg = "범위 인식됨 — 가운데 버튼으로 찍으세요";
             else if (now < cooldownUntil) msg = "저장했습니다 · 다음 장을 놓아주세요";
             else if (lastPrint != null && DocDetector.similarity(lastPrint, print) > SAME_PAGE) msg = "방금 찍은 장이에요 · 다음 장을 놓아주세요";
             else if (!stable) msg = "그대로 잠깐만 멈춰 주세요";
@@ -304,7 +372,7 @@ public class CameraActivity extends AppCompatActivity {
             final String m = msg;
             runOnUiThread(() -> {
                 overlay.set(relF, fw, fh, prog);
-                if (auto || relF != null) status.setText(m);
+                status.setText(m);
             });
             if (shoot) takeShot(rel, print);
         } catch (Throwable t) {
@@ -327,6 +395,7 @@ public class CameraActivity extends AppCompatActivity {
 
     private void takeShot(double[] rel, float[] print) {
         if (capture == null || capturing) return;
+        final boolean scr = screen;
         capturing = true;
         runOnUiThread(() -> overlay.flash());
         capture.takePicture(workExec, new ImageCapture.OnImageCapturedCallback() {
@@ -341,7 +410,7 @@ public class CameraActivity extends AppCompatActivity {
                     int rot = image.getImageInfo().getRotationDegrees();
                     image.close();
                     Bitmap full = Cropper.decode(jpeg, rot, 3200);
-                    page = Cropper.crop(full, rel);
+                    page = Cropper.crop(full, rel, scr);
                     if (page != full) full.recycle();
                     store.save(page);
                     lastPrint = print;
