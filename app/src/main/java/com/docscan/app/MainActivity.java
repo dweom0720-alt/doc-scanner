@@ -58,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private androidx.activity.OnBackPressedCallback backCb;
 
     private ActivityResultLauncher<String> pickLauncher;
+    private ActivityResultLauncher<String[]> pdfLauncher;
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -65,12 +66,32 @@ public class MainActivity extends AppCompatActivity {
         store = new PageStore(this);
         mode = getSharedPreferences("pdf", MODE_PRIVATE).getInt("mode", PdfMaker.MODE_BW);
         pickLauncher = registerForActivityResult(new ActivityResultContracts.GetMultipleContents(), this::importImages);
+        pdfLauncher = registerForActivityResult(new ActivityResultContracts.OpenDocument(), u -> { if (u != null) askCompress(u); });
         setContentView(buildUi());
         backCb = new androidx.activity.OnBackPressedCallback(false) {
             @Override public void handleOnBackPressed() { endSelect(); }
         };
         getOnBackPressedDispatcher().addCallback(this, backCb);
         refresh();
+        handlePdfIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        handlePdfIntent(intent);
+    }
+
+    /** 다른 앱에서 '공유 → 문서스캔' 하거나 PDF를 이 앱으로 열었을 때 */
+    @SuppressWarnings("deprecation")
+    private void handlePdfIntent(Intent in) {
+        if (in == null) return;
+        Uri u = null;
+        if (Intent.ACTION_SEND.equals(in.getAction())) u = in.getParcelableExtra(Intent.EXTRA_STREAM);
+        else if (Intent.ACTION_VIEW.equals(in.getAction())) u = in.getData();
+        if (u == null) return;
+        setIntent(new Intent(this, MainActivity.class)); // 화면 회전 등으로 다시 묻지 않게
+        final Uri target = u;
+        ui.post(() -> askCompress(target));
     }
 
     @Override protected void onResume() {
@@ -100,6 +121,14 @@ public class MainActivity extends AppCompatActivity {
         imp.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         imp.setPadding(dp(10), dp(6), 0, dp(6));
         imp.setOnClickListener(v -> pickLauncher.launch("image/*"));
+        TextView shrink = new TextView(this);
+        shrink.setText("PDF 줄이기");
+        shrink.setTextColor(Color.WHITE);
+        shrink.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        shrink.setTypeface(null, android.graphics.Typeface.BOLD);
+        shrink.setPadding(dp(10), dp(6), dp(14), dp(6));
+        shrink.setOnClickListener(v -> pdfLauncher.launch(new String[]{"application/pdf"}));
+        bar.addView(shrink);
         bar.addView(imp);
         root.addView(bar);
 
@@ -429,6 +458,65 @@ public class MainActivity extends AppCompatActivity {
             box.setOnLongClickListener(v -> { startSelect(f); return true; });
         }
         return box;
+    }
+
+    // ---------- PDF 줄이기 ----------
+    private void askCompress(Uri src) {
+        String[] items = {
+                "흑백 — 가장 작게 (글자 문서)",
+                "회색 — 작게 (흐린 글씨·도장 음영 유지)",
+                "컬러 — 색 유지 (사진·컬러 도장)"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("PDF 용량 줄이기 · 방식 선택")
+                .setItems(items, (d, which) -> runCompress(src, which))
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
+    private void runCompress(Uri src, int m) {
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("PDF 줄이는 중…")
+                .setMessage("페이지 읽는 중")
+                .setCancelable(false).create();
+        dlg.show();
+        io.execute(() -> {
+            try {
+                PdfCompressor.Result r = PdfCompressor.compress(this, src, m,
+                        (done, total) -> ui.post(() -> dlg.setMessage(done + " / " + total + "쪽")));
+                ui.post(() -> { dlg.dismiss(); showCompressed(r); });
+            } catch (Exception e) {
+                ui.post(() -> { dlg.dismiss(); toast("실패: " + e.getMessage()); });
+            }
+        });
+    }
+
+    private static String human(long b) {
+        return b < 1024 * 1024 ? Math.max(1, b / 1024) + " KB" : String.format(Locale.US, "%.1f MB", b / 1048576f);
+    }
+
+    private void showCompressed(PdfCompressor.Result r) {
+        if (r.notSmaller) {
+            new AlertDialog.Builder(this)
+                    .setTitle("더 줄어들지 않아요")
+                    .setMessage("'" + r.srcName + "' (" + human(r.before) + ")\n\n"
+                            + "이 방식으로 바꾸면 " + human(r.after) + "로 오히려 커져서 저장하지 않았어요.\n"
+                            + "글자로 만들어진 PDF(워드·한글에서 저장한 파일)는 이미 작은 경우가 많아요. "
+                            + "흑백으로 다시 시도해 보시거나 원본을 그대로 쓰세요.")
+                    .setPositiveButton("확인", null)
+                    .show();
+            return;
+        }
+        int pct = (int) Math.round(100.0 * (r.before - r.after) / r.before);
+        new AlertDialog.Builder(this)
+                .setTitle("줄이기 완료 · " + pct + "% 감소")
+                .setMessage(human(r.before) + "  →  " + human(r.after) + "  (" + r.pages + "쪽)\n\n"
+                        + r.name + "\n위치: 다운로드 / 문서스캔\n\n"
+                        + "※ 페이지가 그림으로 바뀌어, 줄인 파일에서는 글자 검색·복사가 안 돼요. 원본은 그대로 남아 있어요.")
+                .setPositiveButton("공유", (d, w) -> share(r.uri))
+                .setNegativeButton("열기", (d, w) -> open(r.uri))
+                .setNeutralButton("닫기", null)
+                .show();
     }
 
     // ---------- PDF ----------

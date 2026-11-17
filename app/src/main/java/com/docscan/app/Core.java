@@ -175,20 +175,29 @@ public final class Core {
         }
 
         /** 1비트 흑백 이미지 페이지 */
-        public void addBilevel(byte[] packedBits, int w, int h) throws IOException {
+        public void addBilevel(byte[] packedBits, int w, int h) throws IOException { addBilevel(packedBits, w, h, 0, 0); }
+
+        /** pageW/pageH: 페이지 크기(pt). 0이면 A4 긴 변에 맞춤 */
+        public void addBilevel(byte[] packedBits, int w, int h, double pageW, double pageH) throws IOException {
             byte[] z = deflate(packedBits);
-            addImage(z, w, h, "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode");
+            addImage(z, w, h, "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode", pageW, pageH);
         }
 
         /** JPEG 그대로 넣는 페이지 (회색·컬러) */
-        public void addJpeg(byte[] jpeg, int w, int h) throws IOException {
-            addImage(jpeg, w, h, "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode");
+        public void addJpeg(byte[] jpeg, int w, int h) throws IOException { addJpeg(jpeg, w, h, 0, 0); }
+
+        public void addJpeg(byte[] jpeg, int w, int h, double pageW, double pageH) throws IOException {
+            addImage(jpeg, w, h, "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode", pageW, pageH);
         }
 
-        private void addImage(byte[] data, int w, int h, String dict) throws IOException {
-            // 긴 변을 A4 긴 변(842pt)에 맞춤
-            double scale = 842.0 / Math.max(w, h);
-            String pw = fmt(w * scale), ph = fmt(h * scale);
+        private void addImage(byte[] data, int w, int h, String dict, double pageW, double pageH) throws IOException {
+            String pw, ph;
+            if (pageW > 0 && pageH > 0) { pw = fmt(pageW); ph = fmt(pageH); }
+            else {
+                // 긴 변을 A4 긴 변(842pt)에 맞춤
+                double scale = 842.0 / Math.max(w, h);
+                pw = fmt(w * scale); ph = fmt(h * scale);
+            }
 
             int img = begin(nextId++);
             write("<< /Type /XObject /Subtype /Image /Width " + w + " /Height " + h + " " + dict

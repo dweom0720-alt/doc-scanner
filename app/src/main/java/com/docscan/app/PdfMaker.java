@@ -120,6 +120,14 @@ public final class PdfMaker {
     public static Page process(File f, int mode) {
         Bitmap bmp = decodeScaled(f, targetLong(mode));
         if (bmp == null) return null;
+        return process(bmp, mode, true);
+    }
+
+    /**
+     * @param flatten true: 촬영 사진용(그림자·조명 얼룩을 지워 배경을 하얗게).
+     *                false: 원래 깨끗한 PDF 페이지용(회색 상자·색을 그대로 둠)
+     */
+    public static Page process(Bitmap bmp, int mode, boolean flatten) {
         int w = bmp.getWidth(), h = bmp.getHeight();
         int[] px = new int[w * h];
         bmp.getPixels(px, 0, w, 0, 0, w, h);
@@ -136,11 +144,11 @@ public final class PdfMaker {
         int quality;
         if (mode == MODE_GRAY) {
             int[] gray = Core.toGray(px);
-            Core.flattenGray(gray, w, h);
+            if (flatten) Core.flattenGray(gray, w, h);
             for (int i = 0; i < px.length; i++) px[i] = 0xFF000000 | (gray[i] * 0x010101);
             quality = 50;
         } else {
-            Core.flattenColor(px, w, h);
+            if (flatten) Core.flattenColor(px, w, h);
             quality = 60;
         }
         Bitmap out = bmp.isMutable() ? bmp : bmp.copy(Bitmap.Config.ARGB_8888, true);
@@ -192,7 +200,7 @@ public final class PdfMaker {
         return b;
     }
 
-    private static final class Counting extends FilterOutputStream {
+    static final class Counting extends FilterOutputStream {
         long count;
         Counting(OutputStream o) { super(o); }
         @Override public void write(int b) throws IOException { out.write(b); count++; }
